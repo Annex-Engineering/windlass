@@ -7,6 +7,7 @@ use tokio::{
     time::{sleep_until, Instant},
 };
 use tokio_util::sync::CancellationToken;
+use tracing::trace;
 
 const MESSAGE_HEADER_SIZE: usize = 2;
 const MESSAGE_TRAILER_SIZE: usize = 3;
@@ -143,7 +144,7 @@ impl<R: AsyncRead + Unpin> LowlevelReader<R> {
         self.rdr.read_exact(&mut buf[1..len]).await?;
         buf[0] = len as u8;
         let buf = &buf[..len];
-        // println!(">> [{:?}]", buf);
+        trace!(frame = ?buf, "Received frame");
 
         let seq = buf[MESSAGE_POSITION_SEQ];
         if seq & !MESSAGE_SEQ_MASK != MESSAGE_DEST {
@@ -254,9 +255,14 @@ impl LowlevelWriter {
     where
         W: AsyncWrite + Unpin,
     {
+        // Initial frames to kick things off
+        wr.write_u8(MESSAGE_VALUE_SYNC).await?;
+        trace!("Sent sync");
         let init = encode_frame(0, &[]).unwrap();
-        // println!("<< [{:?}]", init);
         wr.write_all(&init).await?;
+        trace!(payload = ?init, "Sent frame");
+        wr.write_all(&init).await?;
+        trace!(payload = ?init, "Sent frame");
         wr.flush().await?;
 
         loop {
@@ -266,7 +272,7 @@ impl LowlevelWriter {
                         Some(msg) => msg,
                         None => break,
                     };
-                    // println!("<< [{:?}]", msg);
+                    trace!(payload = ?msg, "Sent frame");
                     wr.write_all(&msg).await?;
                     wr.flush().await?;
                 }
