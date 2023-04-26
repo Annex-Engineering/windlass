@@ -255,16 +255,6 @@ impl LowlevelWriter {
     where
         W: AsyncWrite + Unpin,
     {
-        // Initial frames to kick things off
-        wr.write_u8(MESSAGE_VALUE_SYNC).await?;
-        trace!("Sent sync");
-        let init = encode_frame(0, &[]).unwrap();
-        wr.write_all(&init).await?;
-        trace!(payload = ?init, "Sent frame");
-        wr.write_all(&init).await?;
-        trace!(payload = ?init, "Sent frame");
-        wr.flush().await?;
-
         loop {
             select! {
                 msg = inbox.recv() => {
@@ -442,7 +432,7 @@ impl TransportState {
     }
 
     fn can_send(&self) -> bool {
-        self.corked_until.is_none() && self.is_synchronized && self.inflight_messages.len() < 12
+        self.corked_until.is_none() && self.inflight_messages.len() < 12
     }
 
     fn send_new_frame(&mut self, mut initial: Vec<u8>) -> Result<(), TransportError> {

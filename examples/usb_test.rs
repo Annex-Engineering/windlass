@@ -33,7 +33,7 @@ async fn main() {
 
     let mut mcu = McuConnection::connect(port).await.expect("MCU connect");
 
-    // let mut resp = mcu.register_response(Stats).expect("Register");
+    let mut resp = mcu.register_response(Stats).expect("Register");
 
     let clock = mcu.send_receive(GetClock::encode(), Clock);
     let uptime = mcu.send_receive(GetUptime::encode(), Uptime).await;
@@ -47,9 +47,9 @@ async fn main() {
     loop {
         tokio::select! {
             _ = &mut timeout => break,
-            // s = resp.recv() => {
-            //     println!("Stats: {s:?}");
-            // }
+            s = resp.recv() => {
+                println!("Stats: {s:?}");
+            }
             err = mcu.closed() => {
                 println!("MCU connection lost: {err:?}");
                 break;
