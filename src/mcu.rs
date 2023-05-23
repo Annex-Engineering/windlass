@@ -15,6 +15,7 @@ use tokio::{
     },
     task::{spawn, JoinHandle},
 };
+use tracing::{debug, trace};
 
 use crate::encoding::{next_byte, MessageDecodeError};
 use crate::messages::{format_command_args, EncodedMessage, Message, WithOid, WithoutOid};
@@ -146,8 +147,7 @@ impl McuConnectionInner {
             };
             let frame = &mut frame.as_slice();
             if let Err(e) = self.parse_frame(frame) {
-                // TODO
-                println!("Parse error: {e:?}");
+                return Err(e);
             }
         }
         Ok(())
@@ -165,16 +165,26 @@ impl McuConnectionInner {
             // There was no registered raw handler, check the dictionary to decode
             if let Some(dict) = self.dictionary.get() {
                 if let Some(parser) = dict.message_parsers.get(&cmd) {
-                    let mut save = &frame[..];
-                    println!("[{cmd}] {parser:?}");
+                    let mut curmsg = &frame[..];
                     let oid = parser.skip_with_oid(frame)?;
-                    if !self.handlers.call(cmd, oid, frame) {
-                        println!(
-                            "Unhandled message [{}] '{}': {:?}",
-                            cmd,
-                            parser.name,
-                            parser.parse(&mut save).unwrap() // Safe because we skipped before and it
-                                                             // passed
+                    if tracing::enabled!(tracing::Level::TRACE) {
+                        let mut tmp = &curmsg[..];
+                        trace!(
+                            cmd_id = cmd,
+                            cmd_name = parser.name,
+                            data = ?parser.parse(&mut tmp).unwrap(), // Safe because we skipped before and it passed
+                            "Received message",
+                        );
+                    }
+                    if !self.handlers.call(cmd, oid, &mut curmsg) {
+                        debug!(
+                            cmd_id = cmd,
+                            cmd_name = parser.name,
+                            // Safe because we skipped before and it passed. Since call returned
+                            // false, we know no handler took the data and can safely take curmsg
+                            // here.
+                            data = ?parser.parse(&mut curmsg).unwrap(),
+                            "Unhandled message",
                         );
                     }
                 } else {
