@@ -10,7 +10,7 @@ use tokio::{
     io::{AsyncRead, AsyncWrite},
     select,
     sync::{
-        mpsc::{unbounded_channel, UnboundedReceiver},
+        mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender},
         oneshot, OnceCell,
     },
     task::{spawn, JoinHandle},
@@ -71,14 +71,16 @@ pub enum SendReceiveError {
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Hash, Ord, PartialOrd)]
 struct HandlerId(u8, Option<u8>);
 
-type HandlerFn = Box<dyn FnMut(&mut &[u8]) -> HandlerResult + Send>;
+trait Handler: Send + Sync {
+    fn handle(&mut self, data: &mut &[u8]) -> HandlerResult;
+}
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub struct RegisteredResponseHandle(usize);
 
 #[derive(Default)]
 struct Handlers {
-    handlers: std::sync::Mutex<BTreeMap<HandlerId, (usize, HandlerFn)>>,
+    handlers: std::sync::Mutex<BTreeMap<HandlerId, (usize, Box<dyn Handler>)>>,
     next_handler: AtomicUsize,
 }
 
@@ -93,7 +95,7 @@ impl Handlers {
         &self,
         command: u8,
         oid: Option<u8>,
-        handler: HandlerFn,
+        handler: Box<dyn Handler>,
     ) -> RegisteredResponseHandle {
         let id = HandlerId(command, oid);
         let uniq = self
@@ -108,7 +110,7 @@ impl Handlers {
         let mut handlers = self.handlers.lock().unwrap();
         let handler = handlers.get_mut(&id);
         if let Some((_, handler)) = handler {
-            if matches!(handler(data), HandlerResult::Deregister) {
+            if matches!(handler.handle(data), HandlerResult::Deregister) {
                 handlers.remove(&id);
             }
             true
@@ -123,7 +125,7 @@ impl Handlers {
         if let Some(RegisteredResponseHandle(uniq)) = uniq {
             match handlers.get(&id) {
                 None => return,
-                Some((u, _)) if *u == uniq => return,
+                Some((u, _)) if *u != uniq => return,
                 _ => {}
             }
         }
@@ -358,27 +360,29 @@ impl McuConnection {
         reply: R,
         oid: Option<u8>,
     ) -> Result<R::PodOwned, SendReceiveError> {
-        let cmd = self.encode_command(command)?;
+        struct RespHandler<R: Message>(
+            Option<oneshot::Sender<Result<R::PodOwned, McuConnectionError>>>,
+        );
 
-        let (tx, mut rx) = tokio::sync::oneshot::channel::<Result<R::PodOwned, _>>();
-
-        self.verify_command_matches::<C>()?;
-        self.verify_command_matches::<R>()?;
-
-        let mut tx = Some(tx);
-        self.register_raw_response(
-            reply,
-            oid,
-            Box::new(move |data| {
-                if let Some(tx) = tx.take() {
+        impl<R: Message> Handler for RespHandler<R> {
+            fn handle(&mut self, data: &mut &[u8]) -> HandlerResult {
+                if let Some(tx) = self.0.take() {
                     let _ = match R::decode(data) {
                         Ok(msg) => tx.send(Ok(msg.into())),
                         Err(e) => tx.send(Err(McuConnectionError::DecodingError(e))),
                     };
                 }
                 HandlerResult::Deregister
-            }),
-        )?;
+            }
+        }
+
+        let cmd = self.encode_command(command)?;
+
+        self.verify_command_matches::<C>()?;
+        self.verify_command_matches::<R>()?;
+
+        let (tx, mut rx) = tokio::sync::oneshot::channel::<Result<R::PodOwned, _>>();
+        self.register_raw_response(reply, oid, Box::new(RespHandler::<R>(Some(tx))))?;
 
         let mut retry_delay = 0.01;
         for _retry in 0..=5 {
@@ -433,7 +437,7 @@ impl McuConnection {
         &self,
         _reply: R,
         oid: Option<u8>,
-        handler: HandlerFn,
+        handler: Box<dyn Handler>,
     ) -> Result<RegisteredResponseHandle, McuConnectionError> {
         let id = R::get_id(self.inner.dictionary.get())
             .ok_or_else(|| McuConnectionError::UnknownMessageId(R::get_name()))?;
@@ -445,21 +449,33 @@ impl McuConnection {
         reply: R,
         oid: Option<u8>,
     ) -> Result<UnboundedReceiver<R::PodOwned>, McuConnectionError> {
-        let (tx, rx) = unbounded_channel();
+        struct RespHandler<R: Message>(UnboundedSender<R::PodOwned>, Option<oneshot::Sender<()>>);
 
-        let tx_closed = tx.clone();
-        let uniq = self.register_raw_response(
-            reply,
-            oid,
-            Box::new(move |data| {
+        impl<R: Message> Drop for RespHandler<R> {
+            fn drop(&mut self) {
+                self.1.take();
+            }
+        }
+
+        impl<R: Message> Handler for RespHandler<R> {
+            fn handle(&mut self, data: &mut &[u8]) -> HandlerResult {
                 let msg = R::decode(data)
                     .expect("Parser should already have assured this could parse")
                     .into();
-                match tx.send(msg) {
+                match self.0.send(msg) {
                     Ok(_) => HandlerResult::Continue,
                     Err(_) => HandlerResult::Deregister,
                 }
-            }),
+            }
+        }
+
+        let (tx, rx) = unbounded_channel();
+        let tx_closed = tx.clone();
+        let (closer_tx, closer_rx) = oneshot::channel();
+        let uniq = self.register_raw_response(
+            reply,
+            oid,
+            Box::new(RespHandler::<R>(tx, Some(closer_tx))),
         )?;
 
         // Safe because register_raw_response already verified this
@@ -467,7 +483,10 @@ impl McuConnection {
 
         let inner = self.inner.clone();
         spawn(async move {
-            tx_closed.closed().await;
+            select! {
+                _ = tx_closed.closed() => {},
+                _ = closer_rx => {},
+            }
             inner.handlers.remove_handler(id, oid, Some(uniq));
         });
 
