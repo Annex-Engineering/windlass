@@ -182,12 +182,6 @@ impl ToFieldType for Vec<u8> {
     }
 }
 
-impl ToFieldType for &[u8] {
-    fn as_field_type() -> FieldType {
-        FieldType::ByteArray
-    }
-}
-
 impl<'de> Readable<'de> for &'de str {
     fn read(data: &mut &'de [u8]) -> Result<&'de str, MessageDecodeError> {
         let len = parse_vlq_int(data)? as usize;
@@ -226,7 +220,7 @@ impl Borrowable for String {
     }
 }
 
-impl ToFieldType for &str {
+impl ToFieldType for String {
     fn as_field_type() -> FieldType {
         FieldType::String
     }

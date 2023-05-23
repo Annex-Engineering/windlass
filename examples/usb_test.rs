@@ -11,7 +11,7 @@ mcu_reply!(
     "adxl345_status",
     oid: u8,
     sequence: u16,
-    data: &'a [u8]
+    data: Vec<u8>,
 );
 mcu_reply!(Stats, "stats", count: u32, sum: u32, sumsq: u32);
 
