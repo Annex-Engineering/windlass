@@ -60,9 +60,11 @@ pub trait Writable: Sized {
     fn write(&self, output: &mut Vec<u8>);
 }
 
-pub trait Ownable: Sized {
-    type Owned;
-    fn to_owned(&self) -> Self::Owned;
+pub trait Borrowable: Sized {
+    type Borrowed<'a>
+    where
+        Self: 'a;
+    fn from_borrowed<'a>(src: Self::Borrowed<'a>) -> Self;
 }
 
 pub trait ToFieldType: Sized {
@@ -87,10 +89,10 @@ macro_rules! int_readwrite {
             }
         }
 
-        impl Ownable for $type {
-            type Owned = Self;
-            fn to_owned(&self) -> Self::Owned {
-                *self
+        impl Borrowable for $type {
+            type Borrowed<'a> = Self;
+            fn from_borrowed<'a>(src: Self::Borrowed<'a>) -> Self {
+                src
             }
         }
 
@@ -124,10 +126,10 @@ impl Writable for bool {
     }
 }
 
-impl Ownable for bool {
-    type Owned = Self;
-    fn to_owned(&self) -> Self::Owned {
-        *self
+impl Borrowable for bool {
+    type Borrowed<'a> = Self;
+    fn from_borrowed<'a>(src: Self::Borrowed<'a>) -> Self {
+        src
     }
 }
 
@@ -167,10 +169,16 @@ impl Writable for &[u8] {
     }
 }
 
-impl Ownable for &[u8] {
-    type Owned = Vec<u8>;
-    fn to_owned(&self) -> Self::Owned {
-        self.to_vec()
+impl Borrowable for Vec<u8> {
+    type Borrowed<'a> = &'a [u8];
+    fn from_borrowed<'a>(src: Self::Borrowed<'a>) -> Self {
+        src.into()
+    }
+}
+
+impl ToFieldType for Vec<u8> {
+    fn as_field_type() -> FieldType {
+        FieldType::ByteArray
     }
 }
 
@@ -211,10 +219,10 @@ impl Writable for &str {
     }
 }
 
-impl Ownable for &str {
-    type Owned = String;
-    fn to_owned(&self) -> Self::Owned {
-        self.to_string()
+impl Borrowable for String {
+    type Borrowed<'a> = &'a str;
+    fn from_borrowed<'a>(src: Self::Borrowed<'a>) -> Self {
+        src.to_string()
     }
 }
 

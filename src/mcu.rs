@@ -30,7 +30,7 @@ mcu_reply!(
     IdentifyResponse,
     "identify_response" = 0,
     offset: u32,
-    data: &'a [u8],
+    data: Vec<u8>,
 );
 
 /// MCU Connection Errors

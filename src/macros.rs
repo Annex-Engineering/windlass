@@ -25,7 +25,7 @@ macro_rules! mcu_message_impl {
             #[allow(dead_code)]
             impl $ty_name {
                 #[allow(clippy::extra_unused_lifetimes)]
-                pub fn encode<'a>($($arg: $kind, )*) -> $crate::messages::EncodedMessage<Self> {
+                pub fn encode<'a>($($arg: <$kind as $crate::encoding::Borrowable>::Borrowed<'a>, )*) -> $crate::messages::EncodedMessage<Self> {
                     let payload = [<$ty_name Data>] {
                         $($arg,)*
                         _lifetime: Default::default(),
@@ -43,7 +43,8 @@ macro_rules! mcu_message_impl {
 
             #[allow(dead_code)]
             struct [<$ty_name Data>]<'a> {
-                $(pub $arg: $kind,)*
+                // $(pub $arg: $kind,)*
+                $(pub $arg: <$kind as $crate::encoding::Borrowable>::Borrowed<'a>,)*
 
                 _lifetime: std::marker::PhantomData<&'a ()>,
             }
@@ -75,21 +76,19 @@ macro_rules! mcu_message_impl {
 
             #[derive(Clone)]
             #[allow(dead_code)]
-            struct [<$ty_name DataOwned>]<'a> {
-                $(pub $arg: <$kind as $crate::encoding::Ownable>::Owned,)*
-                _lifetime: std::marker::PhantomData<&'a ()>,
+            struct [<$ty_name DataOwned>] {
+                $(pub $arg: $kind,)*
             }
 
-            impl<'a> std::convert::From<[<$ty_name Data>]<'a>> for [<$ty_name DataOwned>]<'static> {
+            impl<'a> std::convert::From<[<$ty_name Data>]<'a>> for [<$ty_name DataOwned>] {
                 fn from(value: [<$ty_name Data>]) -> Self {
                     Self {
-                        $($arg: $crate::encoding::Ownable::to_owned(&value.$arg),)*
-                        _lifetime: Default::default(),
+                        $($arg: $crate::encoding::Borrowable::from_borrowed(value.$arg),)*
                     }
                 }
             }
 
-            impl<'a> std::fmt::Debug for [<$ty_name DataOwned>]<'a> {
+            impl std::fmt::Debug for [<$ty_name DataOwned>] {
                 fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
                     let mut ds = f.debug_struct(stringify!([<$ty_name DataOwned>]));
                     $( let ds = ds.field(stringify!($arg), &self.$arg); )*
@@ -100,7 +99,7 @@ macro_rules! mcu_message_impl {
             #[allow(dead_code)]
             impl $crate::messages::Message for $ty_name {
                 type Pod<'a> = [<$ty_name Data>]<'a>;
-                type PodOwned = [<$ty_name DataOwned>]<'static>;
+                type PodOwned = [<$ty_name DataOwned>];
 
                 fn get_id(dict: Option<&$crate::dictionary::Dictionary>) -> Option<u8> {
                     $cmd_id.or_else(|| dict.and_then(|dict| dict.message_ids.get($cmd_name).copied()))
