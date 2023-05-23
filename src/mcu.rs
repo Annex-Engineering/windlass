@@ -350,8 +350,9 @@ impl McuConnection {
         command: EncodedMessage<C>,
     ) -> Result<(), McuConnectionError> {
         let cmd = self.encode_command(command)?;
-        self.transport.send(&cmd);
-        Ok(())
+        self.transport
+            .send(&cmd)
+            .map_err(|e| McuConnectionError::Transport(TransportError::Transmitter(e)))
     }
 
     async fn send_receive_impl<C: Message, R: Message>(
@@ -386,7 +387,9 @@ impl McuConnection {
 
         let mut retry_delay = 0.01;
         for _retry in 0..=5 {
-            self.transport.send(&cmd);
+            self.transport
+                .send(&cmd)
+                .map_err(|e| McuConnectionError::Transport(TransportError::Transmitter(e)))?;
 
             let sleep = tokio::time::sleep(Duration::from_secs_f32(retry_delay));
             tokio::pin!(sleep);

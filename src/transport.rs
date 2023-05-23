@@ -30,6 +30,8 @@ pub enum ReceiverError {
 pub enum TransmitterError {
     #[error("io error: {0}")]
     IoError(#[from] std::io::Error),
+    #[error("connection closed")]
+    ConnectionClosed,
 }
 
 #[derive(Debug)]
@@ -102,10 +104,10 @@ impl Transport {
         )
     }
 
-    pub(crate) fn send(&self, msg: &[u8]) {
+    pub(crate) fn send(&self, msg: &[u8]) -> Result<(), TransmitterError> {
         self.outbox_tx
             .send(TransportCommand::SendMessage(msg.into()))
-            .expect("send to closed channel(protocol handler dead?)");
+            .map_err(|_| TransmitterError::ConnectionClosed)
     }
 
     pub(crate) async fn close(self) {
@@ -608,9 +610,6 @@ impl<T> MessageQueue<T> {
     }
 
     fn send(&mut self, msg: T) {
-        self.sender
-            .send(msg)
-            .map_err(|_| ())
-            .expect("receive end dead?");
+        let _ = self.sender.send(msg);
     }
 }
