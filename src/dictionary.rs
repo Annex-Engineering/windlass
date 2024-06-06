@@ -1,6 +1,9 @@
 use std::collections::BTreeMap;
 
-use crate::messages::{MessageParser, MessageSkipperError};
+use crate::{
+    encoding::encode_vlq_int,
+    messages::{MessageParser, MessageSkipperError},
+};
 
 #[derive(Debug, Clone, PartialEq, serde::Deserialize)]
 #[serde(untagged)]
@@ -25,9 +28,11 @@ pub(crate) struct RawDictionary {
     enumerations: BTreeMap<String, BTreeMap<String, Enumeration>>,
 
     #[serde(default)]
-    commands: BTreeMap<String, i8>,
+    commands: BTreeMap<String, i16>,
     #[serde(default)]
-    responses: BTreeMap<String, i8>,
+    responses: BTreeMap<String, i16>,
+    #[serde(default)]
+    output: BTreeMap<String, i16>,
 
     #[serde(default)]
     build_versions: Option<String>,
@@ -47,15 +52,18 @@ pub enum DictionaryError {
     /// Received a command in an invalid format
     #[error("invalid command format: {0}")]
     InvalidCommandFormat(String, MessageSkipperError),
+    /// Received an output string with an invalid format
+    #[error("invalid output format: {0}")]
+    InvalidOutputFormat(String, MessageSkipperError),
     /// Received a command with an invalid tag
     #[error("command tag {0} output valid range of -32..95")]
-    InvalidCommandTag(i8),
+    InvalidCommandTag(u16),
 }
 
 #[derive(Debug)]
 pub struct Dictionary {
-    pub message_ids: BTreeMap<String, u8>,
-    pub message_parsers: BTreeMap<u8, MessageParser>,
+    pub message_ids: BTreeMap<String, u16>,
+    pub message_parsers: BTreeMap<u16, MessageParser>,
     pub config: BTreeMap<String, ConfigVar>,
     pub enumerations: BTreeMap<String, BTreeMap<String, Enumeration>>,
     pub build_versions: Option<String>,
@@ -88,6 +96,13 @@ impl Dictionary {
             message_ids.insert(name.to_string(), tag);
         }
 
+        for (msg, tag) in raw.output {
+            let parser = MessageParser::new_output(&msg)
+                .map_err(|e| DictionaryError::InvalidCommandFormat(msg.to_string(), e))?;
+            let tag = Self::map_tag(tag)?;
+            message_parsers.insert(tag, parser);
+        }
+
         Ok(Dictionary {
             message_ids,
             message_parsers,
@@ -99,11 +114,18 @@ impl Dictionary {
         })
     }
 
-    fn map_tag(tag: i8) -> Result<u8, DictionaryError> {
-        match tag {
-            0..=95 => Ok(tag as u8),
-            -32..=-1 => Ok(((tag as i16) - 128) as u8),
-            _ => Err(DictionaryError::InvalidCommandTag(tag)),
+    fn map_tag(tag: i16) -> Result<u16, DictionaryError> {
+        let mut buf = vec![];
+        encode_vlq_int(&mut buf, tag as u32);
+        let v = if buf.len() > 1 {
+            ((buf[0] as u16) & 0x7F) << 7 | (buf[1] as u16) & 0x7F
+        } else {
+            (buf[0] as u16) & 0x7F
+        };
+        if v >= 1 << 14 {
+            Err(DictionaryError::InvalidCommandTag(v))
+        } else {
+            Ok(v)
         }
     }
 }

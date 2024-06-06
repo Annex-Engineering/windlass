@@ -1,3 +1,7 @@
+use std::fmt::Display;
+
+use crate::messages::MessageSkipperError;
+
 /// Message decoding error
 #[derive(thiserror::Error, Debug, Clone)]
 pub enum MessageDecodeError {
@@ -9,7 +13,7 @@ pub enum MessageDecodeError {
     Utf8Error(#[from] std::str::Utf8Error),
 }
 
-fn encode_vlq_int(output: &mut Vec<u8>, v: u32) {
+pub(crate) fn encode_vlq_int(output: &mut Vec<u8>, v: u32) {
     let sv = v as i32;
     if !(-(1 << 26)..(3 << 26)).contains(&sv) {
         output.push(((sv >> 28) & 0x7F) as u8 | 0x80);
@@ -36,7 +40,7 @@ pub(crate) fn next_byte(data: &mut &[u8]) -> Result<u8, MessageDecodeError> {
     }
 }
 
-fn parse_vlq_int(data: &mut &[u8]) -> Result<u32, MessageDecodeError> {
+pub(crate) fn parse_vlq_int(data: &mut &[u8]) -> Result<u32, MessageDecodeError> {
     let mut c = next_byte(data)? as u32;
     let mut v = c & 0x7F;
     if (c & 0x60) == 0x60 {
@@ -64,7 +68,7 @@ pub trait Borrowable: Sized {
     type Borrowed<'a>
     where
         Self: 'a;
-    fn from_borrowed<'a>(src: Self::Borrowed<'a>) -> Self;
+    fn from_borrowed(src: Self::Borrowed<'_>) -> Self;
 }
 
 pub trait ToFieldType: Sized {
@@ -91,7 +95,7 @@ macro_rules! int_readwrite {
 
         impl Borrowable for $type {
             type Borrowed<'a> = Self;
-            fn from_borrowed<'a>(src: Self::Borrowed<'a>) -> Self {
+            fn from_borrowed(src: Self::Borrowed<'_>) -> Self {
                 src
             }
         }
@@ -128,7 +132,7 @@ impl Writable for bool {
 
 impl Borrowable for bool {
     type Borrowed<'a> = Self;
-    fn from_borrowed<'a>(src: Self::Borrowed<'a>) -> Self {
+    fn from_borrowed(src: Self::Borrowed<'_>) -> Self {
         src
     }
 }
@@ -171,7 +175,7 @@ impl Writable for &[u8] {
 
 impl Borrowable for Vec<u8> {
     type Borrowed<'a> = &'a [u8];
-    fn from_borrowed<'a>(src: Self::Borrowed<'a>) -> Self {
+    fn from_borrowed(src: Self::Borrowed<'_>) -> Self {
         src.into()
     }
 }
@@ -215,7 +219,7 @@ impl Writable for &str {
 
 impl Borrowable for String {
     type Borrowed<'a> = &'a str;
-    fn from_borrowed<'a>(src: Self::Borrowed<'a>) -> Self {
+    fn from_borrowed(src: Self::Borrowed<'_>) -> Self {
         src.to_string()
     }
 }
@@ -261,6 +265,26 @@ impl FieldType {
             Self::ByteArray => FieldValue::ByteArray(<&[u8] as Readable>::read(input)?.into()),
         })
     }
+
+    pub(crate) fn from_format(s: &str) -> Result<(Self, &str), MessageSkipperError> {
+        if let Some(rest) = s.strip_prefix("%u") {
+            Ok((FieldType::U32, rest))
+        } else if let Some(rest) = s.strip_prefix("%i") {
+            Ok((FieldType::I32, rest))
+        } else if let Some(rest) = s.strip_prefix("%hu") {
+            Ok((FieldType::U16, rest))
+        } else if let Some(rest) = s.strip_prefix("%hi") {
+            Ok((FieldType::I16, rest))
+        } else if let Some(rest) = s.strip_prefix("%c") {
+            Ok((FieldType::U8, rest))
+        } else if let Some(rest) = s.strip_prefix("%.*s") {
+            Ok((FieldType::ByteArray, rest))
+        } else if let Some(rest) = s.strip_prefix("%*s") {
+            Ok((FieldType::String, rest))
+        } else {
+            Err(MessageSkipperError::InvalidFormatFieldType(s.to_string()))
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -272,4 +296,18 @@ pub enum FieldValue {
     U8(u8),
     String(String),
     ByteArray(Vec<u8>),
+}
+
+impl Display for FieldValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::U32(v) => write!(f, "{}", v),
+            Self::I32(v) => write!(f, "{}", v),
+            Self::U16(v) => write!(f, "{}", v),
+            Self::I16(v) => write!(f, "{}", v),
+            Self::U8(v) => write!(f, "{}", v),
+            Self::String(v) => write!(f, "{}", v),
+            Self::ByteArray(v) => write!(f, "{:?}", v),
+        }
+    }
 }

@@ -9,6 +9,8 @@ pub enum MessageSkipperError {
     InvalidArgumentFormat(String),
     #[error("unknown type '{1}' for argument '{0}'")]
     UnknownType(String, String),
+    #[error("invalid format field type '%{0}'")]
+    InvalidFormatFieldType(String),
 }
 
 pub(crate) fn format_command_args<'a>(
@@ -37,6 +39,7 @@ pub(crate) fn format_command_args<'a>(
 pub struct MessageParser {
     pub name: String,
     pub fields: Vec<(String, FieldType)>,
+    pub output: Option<OutputFormat>,
 }
 
 impl MessageParser {
@@ -50,27 +53,44 @@ impl MessageParser {
                 .split_once('=')
                 .ok_or_else(|| MessageSkipperError::InvalidArgumentFormat(part.into()))?;
 
-            let field_type = match ty {
-                "%u" => FieldType::U32,
-                "%i" => FieldType::I32,
-                "%hu" => FieldType::U16,
-                "%hi" => FieldType::I16,
-                "%c" => FieldType::U8,
-                "%s" => FieldType::String,
-                "%.*s" => FieldType::ByteArray,
-                "%*s" => FieldType::ByteArray,
-                s => {
-                    return Err(MessageSkipperError::UnknownType(
-                        arg.to_string(),
-                        s.to_string(),
-                    ))
-                }
-            };
+            let field_type = FieldType::from_format(ty)?.0;
             fields.push((arg.to_string(), field_type));
         }
         Ok(Self {
             name: name.to_string(),
             fields,
+            output: None,
+        })
+    }
+
+    pub(crate) fn new_output(msg: &str) -> Result<MessageParser, MessageSkipperError> {
+        let mut fields = vec![];
+        let mut parts = vec![];
+
+        let mut work = msg;
+        while let Some(pos) = work.find('%') {
+            let (pre, rest) = work.split_at(pos);
+            if !pre.is_empty() {
+                parts.push(FormatBlock::Static(pre.to_string()));
+            }
+            if let Some(rest) = rest.strip_prefix("%%") {
+                parts.push(FormatBlock::Static("%".to_string()));
+                work = rest;
+                break;
+            }
+            let (format, rest) = FieldType::from_format(rest)?;
+            parts.push(FormatBlock::Field);
+            fields.push((format!("field_{}", fields.len()), format));
+            work = rest;
+        }
+        if !work.is_empty() {
+            parts.push(FormatBlock::Static(work.to_string()));
+        }
+
+        Ok(Self {
+            name: msg.to_string(),
+            fields,
+            output: Some(OutputFormat { parts }),
         })
     }
 
@@ -109,6 +129,16 @@ impl MessageParser {
         }
         Ok(output)
     }
+
+    pub(crate) fn parse_and_output(
+        &self,
+        input: &mut &[u8],
+    ) -> Option<Result<String, MessageDecodeError>> {
+        self.output.as_ref().map(|output| {
+            let fields = self.parse(input)?;
+            Ok(output.format(fields.values()))
+        })
+    }
 }
 
 impl std::fmt::Debug for MessageParser {
@@ -123,7 +153,7 @@ impl std::fmt::Debug for MessageParser {
 pub trait Message: 'static {
     type Pod<'a>: Into<Self::PodOwned> + std::fmt::Debug;
     type PodOwned: Clone + Send + std::fmt::Debug + 'static;
-    fn get_id(dict: Option<&Dictionary>) -> Option<u8>;
+    fn get_id(dict: Option<&Dictionary>) -> Option<u16>;
     fn get_name() -> &'static str;
     fn decode<'a>(input: &mut &'a [u8]) -> Result<Self::Pod<'a>, MessageDecodeError>;
     fn fields() -> Vec<(&'static str, FieldType)>;
@@ -134,7 +164,7 @@ pub trait WithoutOid: 'static {}
 
 /// Represents an encoded message, with a type-level link to the message kind
 pub struct EncodedMessage<M> {
-    pub payload: Vec<u8>,
+    pub payload: FrontTrimmableBuffer,
     pub _message_kind: std::marker::PhantomData<M>,
 }
 
@@ -149,7 +179,7 @@ impl<R: Message> std::fmt::Debug for EncodedMessage<R> {
 
 impl<M: Message> EncodedMessage<M> {
     #[doc(hidden)]
-    pub fn message_id(&self, dict: Option<&Dictionary>) -> Option<u8> {
+    pub fn message_id(&self, dict: Option<&Dictionary>) -> Option<u16> {
         M::get_id(dict)
     }
 
@@ -157,4 +187,51 @@ impl<M: Message> EncodedMessage<M> {
     pub fn message_name(&self) -> &'static str {
         M::get_name()
     }
+}
+
+/// Wraps a Vec<u8> allowing removal of front bytes in a zero-copy way
+pub struct FrontTrimmableBuffer {
+    pub content: Vec<u8>,
+    pub offset: usize,
+}
+
+impl FrontTrimmableBuffer {
+    pub fn as_slice(&self) -> &[u8] {
+        &self.content[self.offset..]
+    }
+}
+
+impl std::fmt::Debug for FrontTrimmableBuffer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Debug::fmt(self.as_slice(), f)
+    }
+}
+
+/// Holds the format of a `output()` style debug message
+#[derive(Debug)]
+pub struct OutputFormat {
+    parts: Vec<FormatBlock>,
+}
+
+impl OutputFormat {
+    fn format<'a>(&self, mut fields: impl Iterator<Item = &'a FieldValue>) -> String {
+        let mut buf = String::new();
+        for part in &self.parts {
+            match part {
+                FormatBlock::Static(s) => buf.push_str(s),
+                FormatBlock::Field => {
+                    if let Some(v) = fields.next() {
+                        std::fmt::write(&mut buf, format_args!("{v}")).ok();
+                    }
+                }
+            }
+        }
+        buf
+    }
+}
+
+#[derive(Debug)]
+enum FormatBlock {
+    Static(String),
+    Field,
 }

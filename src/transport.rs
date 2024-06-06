@@ -146,9 +146,9 @@ impl<R: AsyncRead + Unpin> LowlevelReader<R> {
         self.rdr.read_exact(&mut buf[1..len]).await?;
         buf[0] = len as u8;
         let buf = &buf[..len];
-        trace!(frame = ?buf, "Received frame");
-
         let seq = buf[MESSAGE_POSITION_SEQ];
+        trace!(frame = ?buf, seq = seq, "Received frame");
+
         if seq & !MESSAGE_SEQ_MASK != MESSAGE_DEST {
             self.synced = false;
             return Ok(None);
@@ -264,7 +264,7 @@ impl LowlevelWriter {
                         Some(msg) => msg,
                         None => break,
                     };
-                    trace!(payload = ?msg, "Sent frame");
+                    trace!(payload = ?msg, seq = msg[MESSAGE_POSITION_SEQ], "Sent frame");
                     wr.write_all(&msg).await?;
                     wr.flush().await?;
                 }

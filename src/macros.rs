@@ -51,12 +51,13 @@ macro_rules! mcu_message_impl {
 
             #[allow(dead_code)]
             impl<'a> [<$ty_name Data>]<'a> {
-                fn encode(&self) -> Vec<u8> {
+                fn encode(&self) -> $crate::messages::FrontTrimmableBuffer {
                     use $crate::encoding::Writable;
                     let mut buf = Vec::with_capacity($crate::macros::MESSAGE_LENGTH_PAYLOAD_MAX);
                     buf.push(0);
+                    buf.push(0);
                     $(self.$arg.write(&mut buf);)*
-                    buf
+                    $crate::messages::FrontTrimmableBuffer { content: buf, offset: 0 }
                 }
 
                 fn decode(input: &mut &'a [u8]) -> Result<Self, $crate::encoding::MessageDecodeError> {
@@ -101,7 +102,7 @@ macro_rules! mcu_message_impl {
                 type Pod<'a> = [<$ty_name Data>]<'a>;
                 type PodOwned = [<$ty_name DataOwned>];
 
-                fn get_id(dict: Option<&$crate::dictionary::Dictionary>) -> Option<u8> {
+                fn get_id(dict: Option<&$crate::dictionary::Dictionary>) -> Option<u16> {
                     $cmd_id.or_else(|| dict.and_then(|dict| dict.message_ids.get($cmd_name).copied()))
                 }
 

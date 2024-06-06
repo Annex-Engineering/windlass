@@ -15,14 +15,17 @@ use tokio::{
     },
     task::{spawn, JoinHandle},
 };
-use tracing::{debug, trace};
+use tracing::{debug, error, trace};
 
-use crate::encoding::{next_byte, MessageDecodeError};
 use crate::messages::{format_command_args, EncodedMessage, Message, WithOid, WithoutOid};
 use crate::transport::{Transport, TransportReceiver};
 use crate::{
     dictionary::{Dictionary, DictionaryError, RawDictionary},
     transport::TransportError,
+};
+use crate::{
+    encoding::{parse_vlq_int, MessageDecodeError},
+    messages::FrontTrimmableBuffer,
 };
 
 mcu_command!(Identify, "identify" = 1, offset: u32, count: u8);
@@ -51,7 +54,7 @@ pub enum McuConnectionError {
     Dictionary(#[from] DictionaryError),
     /// Received an unknown command from the MCU
     #[error("unknown command {0}")]
-    UnknownCommand(u8),
+    UnknownCommand(u16),
     /// There was a mismatch between the command arguments on the remote and local sides.
     #[error("mismatched command {0}: '{1}' vs '{2}'")]
     CommandMismatch(&'static str, String, String),
@@ -69,7 +72,7 @@ pub enum SendReceiveError {
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Hash, Ord, PartialOrd)]
-struct HandlerId(u8, Option<u8>);
+struct HandlerId(u16, Option<u8>);
 
 trait Handler: Send + Sync {
     fn handle(&mut self, data: &mut &[u8]) -> HandlerResult;
@@ -80,20 +83,29 @@ pub struct RegisteredResponseHandle(usize);
 
 #[derive(Default)]
 struct Handlers {
-    handlers: std::sync::Mutex<BTreeMap<HandlerId, (usize, Box<dyn Handler>)>>,
+    handlers: std::sync::Mutex<BTreeMap<HandlerId, UniqueHandler>>,
     next_handler: AtomicUsize,
 }
 
+type UniqueHandler = (usize, Box<dyn Handler>);
+
 impl std::fmt::Debug for Handlers {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Handlers").finish()
+        let h = self
+            .handlers
+            .try_lock()
+            .map(|h| h.keys().cloned().collect::<BTreeSet<_>>())
+            .unwrap_or_default();
+        f.debug_struct("Handlers")
+            .field("handlers", &h)
+            .finish_non_exhaustive()
     }
 }
 
 impl Handlers {
     fn register(
         &self,
-        command: u8,
+        command: u16,
         oid: Option<u8>,
         handler: Box<dyn Handler>,
     ) -> RegisteredResponseHandle {
@@ -105,7 +117,7 @@ impl Handlers {
         RegisteredResponseHandle(uniq)
     }
 
-    fn call(&self, command: u8, oid: Option<u8>, data: &mut &[u8]) -> bool {
+    fn call(&self, command: u16, oid: Option<u8>, data: &mut &[u8]) -> bool {
         let id = HandlerId(command, oid);
         let mut handlers = self.handlers.lock().unwrap();
         let handler = handlers.get_mut(&id);
@@ -119,7 +131,12 @@ impl Handlers {
         }
     }
 
-    fn remove_handler(&self, command: u8, oid: Option<u8>, uniq: Option<RegisteredResponseHandle>) {
+    fn remove_handler(
+        &self,
+        command: u16,
+        oid: Option<u8>,
+        uniq: Option<RegisteredResponseHandle>,
+    ) {
         let id = HandlerId(command, oid);
         let mut handlers = self.handlers.lock().unwrap();
         if let Some(RegisteredResponseHandle(uniq)) = uniq {
@@ -148,16 +165,14 @@ impl McuConnectionInner {
                 Err(e) => return Err(McuConnectionError::Transport(e)),
             };
             let frame = &mut frame.as_slice();
-            if let Err(e) = self.parse_frame(frame) {
-                return Err(e);
-            }
+            self.parse_frame(frame)?;
         }
         Ok(())
     }
 
     fn parse_frame(&self, frame: &mut &[u8]) -> Result<(), McuConnectionError> {
         while !frame.is_empty() {
-            let cmd = next_byte(frame)?;
+            let cmd = parse_vlq_int(frame)? as u16;
 
             // If a raw handler is registered for this, call it
             if self.handlers.call(cmd, None, frame) {
@@ -167,9 +182,16 @@ impl McuConnectionInner {
             // There was no registered raw handler, check the dictionary to decode
             if let Some(dict) = self.dictionary.get() {
                 if let Some(parser) = dict.message_parsers.get(&cmd) {
+                    if let Some(msg) = parser.parse_and_output(frame) {
+                        let msg = msg?;
+                        debug!(msg = msg, "Output message from MCU");
+                        continue;
+                    }
+
                     let mut curmsg = &frame[..];
                     let oid = parser.skip_with_oid(frame)?;
                     if tracing::enabled!(tracing::Level::TRACE) {
+                        #[allow(clippy::redundant_slicing)] // The parse call changes the slice!
                         let mut tmp = &curmsg[..];
                         trace!(
                             cmd_id = cmd,
@@ -192,6 +214,8 @@ impl McuConnectionInner {
                 } else {
                     return Err(McuConnectionError::UnknownCommand(cmd));
                 }
+            } else {
+                break;
             }
         }
         Ok(())
@@ -280,6 +304,7 @@ impl McuConnection {
             .map_err(|err| McuConnectionError::DictionaryFetch(Box::new(err)))?;
         let dict =
             Dictionary::from_raw_dictionary(raw_dict).map_err(McuConnectionError::Dictionary)?;
+        debug!(dictionary = ?dict, "MCU dictionary");
         conn.inner
             .dictionary
             .set(dict)
@@ -335,12 +360,17 @@ impl McuConnection {
     fn encode_command<C: Message>(
         &self,
         command: EncodedMessage<C>,
-    ) -> Result<Vec<u8>, McuConnectionError> {
+    ) -> Result<FrontTrimmableBuffer, McuConnectionError> {
         let id = command
             .message_id(self.inner.dictionary.get())
             .ok_or_else(|| McuConnectionError::UnknownMessageId(command.message_name()))?;
         let mut payload = command.payload;
-        payload[0] = id;
+        if id >= 0x80 {
+            payload.content[0] = ((id >> 7) & 0x7F) as u8 | 0x80;
+        } else {
+            payload.offset = 1;
+        }
+        payload.content[1] = (id & 0x7F) as u8;
         Ok(payload)
     }
 
@@ -351,7 +381,7 @@ impl McuConnection {
     ) -> Result<(), McuConnectionError> {
         let cmd = self.encode_command(command)?;
         self.transport
-            .send(&cmd)
+            .send(cmd.as_slice())
             .map_err(|e| McuConnectionError::Transport(TransportError::Transmitter(e)))
     }
 
@@ -388,7 +418,7 @@ impl McuConnection {
         let mut retry_delay = 0.01;
         for _retry in 0..=5 {
             self.transport
-                .send(&cmd)
+                .send(cmd.as_slice())
                 .map_err(|e| McuConnectionError::Transport(TransportError::Transmitter(e)))?;
 
             let sleep = tokio::time::sleep(Duration::from_secs_f32(retry_delay));
