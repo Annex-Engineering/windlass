@@ -266,21 +266,35 @@ impl FieldType {
         })
     }
 
+    pub(crate) fn from_msg(s: &str) -> Result<Self, MessageSkipperError> {
+        match s {
+            "%u" => Ok(Self::U32),
+            "%i" => Ok(Self::I32),
+            "%hu" => Ok(Self::U16),
+            "%hi" => Ok(Self::I16),
+            "%c" => Ok(Self::U8),
+            "%s" => Ok(Self::String),
+            "%*s" => Ok(Self::ByteArray),
+            "%.*s" => Ok(Self::ByteArray),
+            s => Err(MessageSkipperError::InvalidFormatFieldType(s.to_string())),
+        }
+    }
+
     pub(crate) fn from_format(s: &str) -> Result<(Self, &str), MessageSkipperError> {
         if let Some(rest) = s.strip_prefix("%u") {
-            Ok((FieldType::U32, rest))
+            Ok((Self::U32, rest))
         } else if let Some(rest) = s.strip_prefix("%i") {
-            Ok((FieldType::I32, rest))
+            Ok((Self::I32, rest))
         } else if let Some(rest) = s.strip_prefix("%hu") {
-            Ok((FieldType::U16, rest))
+            Ok((Self::U16, rest))
         } else if let Some(rest) = s.strip_prefix("%hi") {
-            Ok((FieldType::I16, rest))
+            Ok((Self::I16, rest))
         } else if let Some(rest) = s.strip_prefix("%c") {
-            Ok((FieldType::U8, rest))
+            Ok((Self::U8, rest))
         } else if let Some(rest) = s.strip_prefix("%.*s") {
-            Ok((FieldType::ByteArray, rest))
+            Ok((Self::ByteArray, rest))
         } else if let Some(rest) = s.strip_prefix("%*s") {
-            Ok((FieldType::String, rest))
+            Ok((Self::String, rest))
         } else {
             Err(MessageSkipperError::InvalidFormatFieldType(s.to_string()))
         }

@@ -53,7 +53,7 @@ impl MessageParser {
                 .split_once('=')
                 .ok_or_else(|| MessageSkipperError::InvalidArgumentFormat(part.into()))?;
 
-            let field_type = FieldType::from_format(ty)?.0;
+            let field_type = FieldType::from_msg(ty)?;
             fields.push((arg.to_string(), field_type));
         }
         Ok(Self {

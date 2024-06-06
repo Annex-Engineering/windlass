@@ -502,6 +502,8 @@ impl McuConnection {
             }
         }
 
+        self.verify_command_matches::<R>()?;
+
         let (tx, rx) = unbounded_channel();
         let tx_closed = tx.clone();
         let (closer_tx, closer_rx) = oneshot::channel();
